@@ -46,9 +46,9 @@ export function useLocalStorage(key, initialValue) {
 /**
  * إدارة الكاش مع TTL (مدة الصلاحية)
  * @param {string} key - مفتاح الكاش
- * @param {number} ttlMs - مدة الصلاحية بالمللي ثانية (الافتراضي: ساعة واحدة)
+ * @param {number} ttlMs - مدة الصلاحية بالمللي ثانية (الافتراضي: 24 ساعة)
  */
-export function useCachedData(key, ttlMs = 3600000) {
+export function useCachedData(key, ttlMs = 86400000) {
   // جلب بيانات الكاش إذا كانت صالحة
   const getCached = useCallback(() => {
     try {

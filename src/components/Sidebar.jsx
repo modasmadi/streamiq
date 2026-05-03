@@ -6,38 +6,45 @@ import { CATEGORIES } from "../config.js";
  */
 export default function Sidebar({ activePage, activeCategory, onNavigate, onCategorySelect }) {
   return (
-    <aside className="sidebar">
-      {/* الشعار */}
-      <div className="sidebar-logo">
-        <span>Stream</span>IQ
-      </div>
+    <>
+      <aside className="sidebar">
+        {/* الشعار */}
+        <div className="sidebar-logo">
+          <span>Stream</span>IQ
+        </div>
 
-      {/* التنقل الرئيسي */}
-      <nav className="sidebar-nav">
-        {/* الصفحة الرئيسية */}
+        {/* التنقل الرئيسي (في الديسكتوب فقط يظهر كشريط جانبي، في الموبايل يتحول لشريط سفلي) */}
+        <nav className="sidebar-nav desktop-only">
+          <div
+            className={`sidebar-item ${activePage === "home" ? "active" : ""}`}
+            onClick={() => onNavigate("home")}
+          >
+            <span className="sidebar-item-icon">🏠</span>
+            <span className="sidebar-item-label">الرئيسية</span>
+          </div>
+
+          {/* الفئات (ديسكتوب فقط) */}
+          {CATEGORIES.map((cat) => (
+            <div
+              key={cat.id}
+              className={`sidebar-item ${activeCategory === cat.id ? "active" : ""}`}
+              onClick={() => onCategorySelect(cat.id)}
+            >
+              <span className="sidebar-item-icon">{cat.icon}</span>
+              <span className="sidebar-item-label">{cat.label}</span>
+            </div>
+          ))}
+        </nav>
+
+        {/* الجزء السفلي (في الموبايل يصبح هو الـ Bottom Nav) */}
+      <div className="sidebar-bottom">
         <div
-          className={`sidebar-item ${activePage === "home" ? "active" : ""}`}
+          className={`sidebar-item ${activePage === "home" ? "active" : ""} mobile-only`}
           onClick={() => onNavigate("home")}
         >
           <span className="sidebar-item-icon">🏠</span>
           <span className="sidebar-item-label">الرئيسية</span>
         </div>
-
-        {/* الفئات */}
-        {CATEGORIES.map((cat) => (
-          <div
-            key={cat.id}
-            className={`sidebar-item ${activeCategory === cat.id ? "active" : ""}`}
-            onClick={() => onCategorySelect(cat.id)}
-          >
-            <span className="sidebar-item-icon">{cat.icon}</span>
-            <span className="sidebar-item-label">{cat.label}</span>
-          </div>
-        ))}
-      </nav>
-
-      {/* الجزء السفلي */}
-      <div className="sidebar-bottom">
         <div
           className={`sidebar-item ${activePage === "favorites" ? "active" : ""}`}
           onClick={() => onNavigate("favorites")}

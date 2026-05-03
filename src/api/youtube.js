@@ -5,6 +5,59 @@
 
 const BASE_URL = "https://www.googleapis.com/youtube/v3";
 
+let currentKeyIndex = 0;
+
+/**
+ * دالة مساعدة لتشغيل API مع دعم الـ Key Rotation
+ * تقوم بتجربة المفتاح الحالي، وإذا تم تجاوز الحد اليومي (Quota Exceeded)
+ * تقوم بالتبديل تلقائياً للمفتاح التالي في المصفوفة.
+ */
+async function withKeyRotation(apiKeyString, apiCallFn) {
+  if (!apiKeyString || apiKeyString === "YOUR_YOUTUBE_API_KEY") {
+    throw new Error("يرجى إدخال مفتاح YouTube API في الإعدادات");
+  }
+  
+  const keys = apiKeyString.split(",").map(k => k.trim()).filter(Boolean);
+  if (keys.length === 0) {
+    throw new Error("يرجى إدخال مفتاح YouTube API صالح");
+  }
+
+  let attempts = 0;
+  let lastError = null;
+
+  while (attempts < keys.length) {
+    const activeKey = keys[currentKeyIndex % keys.length];
+    try {
+      return await apiCallFn(activeKey);
+    } catch (err) {
+      lastError = err;
+      if (err.isQuotaError) {
+        console.warn(`[API] مفتاح (${activeKey.substring(0,6)}...) انتهى رصيده. جاري تجربة المفتاح التالي...`);
+        currentKeyIndex++;
+        attempts++;
+      } else {
+        throw err; // Throw immediately if it's a normal error (like network issue)
+      }
+    }
+  }
+  
+  throw new Error("تم تجاوز الحصة اليومية لجميع المفاتيح المدخلة! يرجى إضافة مفاتيح جديدة أو المحاولة غداً.");
+}
+
+/**
+ * تحليل الرد من يوتيوب لرمي خطأ مخصص إذا كان السبب انتهاء الحصة
+ */
+async function handleApiError(res) {
+  const errData = await res.json().catch(() => ({}));
+  const reason = errData?.error?.errors?.[0]?.reason;
+  const isQuota = reason === "quotaExceeded" || reason === "keyInvalid" || errData?.error?.code === 403;
+  
+  const err = new Error(errData?.error?.message || "خطأ في الاتصال بخوادم YouTube");
+  err.isQuotaError = isQuota;
+  throw err;
+}
+
+
 /**
  * تحويل مدة ISO 8601 إلى ثوانٍ
  * مثال: PT1H30M15S → 5415
@@ -21,7 +74,6 @@ function parseDurationToSeconds(iso) {
 
 /**
  * تحويل مدة ISO 8601 إلى صيغة مقروءة
- * مثال: PT1H30M15S → "1:30:15"
  */
 export function formatDuration(isoDuration) {
   if (!isoDuration) return "0:00";
@@ -37,7 +89,6 @@ export function formatDuration(isoDuration) {
 
 /**
  * تحويل عدد المشاهدات إلى صيغة مختصرة
- * مثال: 1500000 → "1.5M"
  */
 export function formatViews(count) {
   if (!count) return "0";
@@ -52,7 +103,7 @@ export function formatViews(count) {
  * البحث عن فيديوهات في YouTube
  * يقوم بتصفية الـ Shorts تلقائياً (أقل من 60 ثانية)
  */
-export async function searchVideos(query, apiKey, options = {}) {
+export async function searchVideos(query, apiKeyString, options = {}) {
   const {
     maxResults = 20,
     order = "relevance",
@@ -60,11 +111,7 @@ export async function searchVideos(query, apiKey, options = {}) {
     pageToken = "",
   } = options;
 
-  if (!apiKey || apiKey === "YOUR_YOUTUBE_API_KEY") {
-    throw new Error("يرجى إدخال مفتاح YouTube API في الإعدادات");
-  }
-
-  try {
+  return withKeyRotation(apiKeyString, async (activeKey) => {
     // الخطوة 1: البحث عن الفيديوهات
     const searchParams = new URLSearchParams({
       part: "snippet",
@@ -74,19 +121,13 @@ export async function searchVideos(query, apiKey, options = {}) {
       order,
       videoDuration,
       videoEmbeddable: "true",
-      key: apiKey,
+      key: activeKey,
       relevanceLanguage: "ar",
     });
     if (pageToken) searchParams.set("pageToken", pageToken);
 
     const searchRes = await fetch(`${BASE_URL}/search?${searchParams}`);
-    if (!searchRes.ok) {
-      const err = await searchRes.json();
-      if (err?.error?.errors?.[0]?.reason === "quotaExceeded") {
-        throw new Error("تم تجاوز حصة YouTube API اليومية. حاول غداً.");
-      }
-      throw new Error(err?.error?.message || "خطأ في البحث");
-    }
+    if (!searchRes.ok) await handleApiError(searchRes);
     const searchData = await searchRes.json();
 
     if (!searchData.items || searchData.items.length === 0) {
@@ -98,11 +139,11 @@ export async function searchVideos(query, apiKey, options = {}) {
     const detailsParams = new URLSearchParams({
       part: "contentDetails,statistics",
       id: videoIds,
-      key: apiKey,
+      key: activeKey,
     });
 
     const detailsRes = await fetch(`${BASE_URL}/videos?${detailsParams}`);
-    if (!detailsRes.ok) throw new Error("خطأ في جلب تفاصيل الفيديوهات");
+    if (!detailsRes.ok) await handleApiError(detailsRes);
     const detailsData = await detailsRes.json();
 
     // بناء خريطة التفاصيل
@@ -138,7 +179,6 @@ export async function searchVideos(query, apiKey, options = {}) {
           likeCount: details.likeCount,
         };
       })
-      // تصفية Shorts (أقل من 60 ثانية)
       .filter((v) => v.durationSeconds >= 60)
       .slice(0, maxResults);
 
@@ -146,104 +186,135 @@ export async function searchVideos(query, apiKey, options = {}) {
       videos,
       nextPageToken: searchData.nextPageToken || null,
     };
-  } catch (err) {
-    console.error("YouTube Search Error:", err);
-    throw err;
-  }
+  });
 }
 
 /**
  * جلب تفاصيل فيديو واحد
  */
-export async function getVideoDetails(videoId, apiKey) {
-  if (!apiKey || apiKey === "YOUR_YOUTUBE_API_KEY") {
-    throw new Error("يرجى إدخال مفتاح YouTube API في الإعدادات");
-  }
+export async function getVideoDetails(videoId, apiKeyString) {
+  return withKeyRotation(apiKeyString, async (activeKey) => {
+    const params = new URLSearchParams({
+      part: "contentDetails,statistics,snippet",
+      id: videoId,
+      key: activeKey,
+    });
 
-  const params = new URLSearchParams({
-    part: "contentDetails,statistics,snippet",
-    id: videoId,
-    key: apiKey,
+    const res = await fetch(`${BASE_URL}/videos?${params}`);
+    if (!res.ok) await handleApiError(res);
+    const data = await res.json();
+
+    if (!data.items || data.items.length === 0) {
+      throw new Error("الفيديو غير موجود أو محجوب");
+    }
+
+    const item = data.items[0];
+    return {
+      id: item.id,
+      title: item.snippet.title,
+      description: item.snippet.description,
+      thumbnail:
+        item.snippet.thumbnails?.maxres?.url ||
+        item.snippet.thumbnails?.high?.url ||
+        item.snippet.thumbnails?.default?.url,
+      channelTitle: item.snippet.channelTitle,
+      publishedAt: item.snippet.publishedAt,
+      tags: item.snippet.tags || [],
+      duration: item.contentDetails.duration,
+      durationFormatted: formatDuration(item.contentDetails.duration),
+      durationSeconds: parseDurationToSeconds(item.contentDetails.duration),
+      viewCount: item.statistics?.viewCount || "0",
+      viewsFormatted: formatViews(item.statistics?.viewCount),
+      likeCount: item.statistics?.likeCount || "0",
+      likesFormatted: formatViews(item.statistics?.likeCount),
+    };
   });
-
-  const res = await fetch(`${BASE_URL}/videos?${params}`);
-  if (!res.ok) throw new Error("خطأ في جلب تفاصيل الفيديو");
-  const data = await res.json();
-
-  if (!data.items || data.items.length === 0) {
-    throw new Error("الفيديو غير موجود أو محجوب");
-  }
-
-  const item = data.items[0];
-  return {
-    id: item.id,
-    title: item.snippet.title,
-    description: item.snippet.description,
-    thumbnail:
-      item.snippet.thumbnails?.maxres?.url ||
-      item.snippet.thumbnails?.high?.url ||
-      item.snippet.thumbnails?.default?.url,
-    channelTitle: item.snippet.channelTitle,
-    publishedAt: item.snippet.publishedAt,
-    tags: item.snippet.tags || [],
-    duration: item.contentDetails.duration,
-    durationFormatted: formatDuration(item.contentDetails.duration),
-    durationSeconds: parseDurationToSeconds(item.contentDetails.duration),
-    viewCount: item.statistics?.viewCount || "0",
-    viewsFormatted: formatViews(item.statistics?.viewCount),
-    likeCount: item.statistics?.likeCount || "0",
-    likesFormatted: formatViews(item.statistics?.likeCount),
-  };
 }
 
 /**
  * البحث في قناة محددة
  */
-export async function searchByChannel(channelId, apiKey, maxResults = 20) {
-  if (!apiKey || apiKey === "YOUR_YOUTUBE_API_KEY") {
-    throw new Error("يرجى إدخال مفتاح YouTube API في الإعدادات");
-  }
+export async function searchByChannel(channelId, apiKeyString, maxResults = 20) {
+  return withKeyRotation(apiKeyString, async (activeKey) => {
+    const params = new URLSearchParams({
+      part: "snippet",
+      channelId,
+      type: "video",
+      maxResults: String(maxResults),
+      order: "date",
+      videoEmbeddable: "true",
+      key: activeKey,
+    });
 
-  const params = new URLSearchParams({
-    part: "snippet",
-    channelId,
-    type: "video",
-    maxResults: String(maxResults),
-    order: "date",
-    videoEmbeddable: "true",
-    key: apiKey,
+    const res = await fetch(`${BASE_URL}/search?${params}`);
+    if (!res.ok) await handleApiError(res);
+    const data = await res.json();
+
+    if (!data.items || data.items.length === 0) return [];
+
+    // جلب التفاصيل
+    const videoIds = data.items.map((i) => i.id.videoId).join(",");
+    const detParams = new URLSearchParams({
+      part: "contentDetails,statistics",
+      id: videoIds,
+      key: activeKey,
+    });
+    const detRes = await fetch(`${BASE_URL}/videos?${detParams}`);
+    if (!detRes.ok) await handleApiError(detRes);
+    const detData = await detRes.json();
+
+    const detMap = {};
+    detData.items?.forEach((d) => {
+      detMap[d.id] = {
+        duration: d.contentDetails.duration,
+        durationSeconds: parseDurationToSeconds(d.contentDetails.duration),
+        viewCount: d.statistics?.viewCount || "0",
+      };
+    });
+
+    return data.items
+      .map((item) => {
+        const det = detMap[item.id.videoId] || {};
+        return {
+          id: item.id.videoId,
+          title: item.snippet.title,
+          description: item.snippet.description,
+          thumbnail:
+            item.snippet.thumbnails?.high?.url ||
+            item.snippet.thumbnails?.default?.url,
+          channelTitle: item.snippet.channelTitle,
+          publishedAt: item.snippet.publishedAt,
+          duration: det.duration || "",
+          durationFormatted: formatDuration(det.duration),
+          durationSeconds: det.durationSeconds || 0,
+          viewCount: det.viewCount,
+          viewsFormatted: formatViews(det.viewCount),
+        };
+      })
+      .filter((v) => v.durationSeconds >= 60);
   });
+}
 
-  const res = await fetch(`${BASE_URL}/search?${params}`);
-  if (!res.ok) throw new Error("خطأ في البحث في القناة");
-  const data = await res.json();
+/**
+ * جلب الفيديوهات الرائجة
+ */
+export async function getTrending(apiKeyString, regionCode = "SA") {
+  return withKeyRotation(apiKeyString, async (activeKey) => {
+    const params = new URLSearchParams({
+      part: "snippet,contentDetails,statistics",
+      chart: "mostPopular",
+      regionCode,
+      maxResults: "20",
+      key: activeKey,
+    });
 
-  if (!data.items || data.items.length === 0) return [];
+    const res = await fetch(`${BASE_URL}/videos?${params}`);
+    if (!res.ok) await handleApiError(res);
+    const data = await res.json();
 
-  // جلب التفاصيل
-  const videoIds = data.items.map((i) => i.id.videoId).join(",");
-  const detParams = new URLSearchParams({
-    part: "contentDetails,statistics",
-    id: videoIds,
-    key: apiKey,
-  });
-  const detRes = await fetch(`${BASE_URL}/videos?${detParams}`);
-  const detData = await detRes.json();
-
-  const detMap = {};
-  detData.items?.forEach((d) => {
-    detMap[d.id] = {
-      duration: d.contentDetails.duration,
-      durationSeconds: parseDurationToSeconds(d.contentDetails.duration),
-      viewCount: d.statistics?.viewCount || "0",
-    };
-  });
-
-  return data.items
-    .map((item) => {
-      const det = detMap[item.id.videoId] || {};
-      return {
-        id: item.id.videoId,
+    return data.items
+      .map((item) => ({
+        id: item.id,
         title: item.snippet.title,
         description: item.snippet.description,
         thumbnail:
@@ -251,73 +322,34 @@ export async function searchByChannel(channelId, apiKey, maxResults = 20) {
           item.snippet.thumbnails?.default?.url,
         channelTitle: item.snippet.channelTitle,
         publishedAt: item.snippet.publishedAt,
-        duration: det.duration || "",
-        durationFormatted: formatDuration(det.duration),
-        durationSeconds: det.durationSeconds || 0,
-        viewCount: det.viewCount,
-        viewsFormatted: formatViews(det.viewCount),
-      };
-    })
-    .filter((v) => v.durationSeconds >= 60);
-}
-
-/**
- * جلب الفيديوهات الرائجة
- */
-export async function getTrending(apiKey, regionCode = "SA") {
-  if (!apiKey || apiKey === "YOUR_YOUTUBE_API_KEY") {
-    throw new Error("يرجى إدخال مفتاح YouTube API في الإعدادات");
-  }
-
-  const params = new URLSearchParams({
-    part: "snippet,contentDetails,statistics",
-    chart: "mostPopular",
-    regionCode,
-    maxResults: "20",
-    key: apiKey,
+        duration: item.contentDetails.duration,
+        durationFormatted: formatDuration(item.contentDetails.duration),
+        durationSeconds: parseDurationToSeconds(item.contentDetails.duration),
+        viewCount: item.statistics?.viewCount || "0",
+        viewsFormatted: formatViews(item.statistics?.viewCount),
+        likeCount: item.statistics?.likeCount || "0",
+      }))
+      .filter((v) => v.durationSeconds >= 60);
   });
-
-  const res = await fetch(`${BASE_URL}/videos?${params}`);
-  if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err?.error?.message || "خطأ في جلب الفيديوهات الرائجة");
-  }
-  const data = await res.json();
-
-  return data.items
-    .map((item) => ({
-      id: item.id,
-      title: item.snippet.title,
-      description: item.snippet.description,
-      thumbnail:
-        item.snippet.thumbnails?.high?.url ||
-        item.snippet.thumbnails?.default?.url,
-      channelTitle: item.snippet.channelTitle,
-      publishedAt: item.snippet.publishedAt,
-      duration: item.contentDetails.duration,
-      durationFormatted: formatDuration(item.contentDetails.duration),
-      durationSeconds: parseDurationToSeconds(item.contentDetails.duration),
-      viewCount: item.statistics?.viewCount || "0",
-      viewsFormatted: formatViews(item.statistics?.viewCount),
-      likeCount: item.statistics?.likeCount || "0",
-    }))
-    .filter((v) => v.durationSeconds >= 60);
 }
 
 /**
  * اختبار صلاحية مفتاح API
  */
-export async function testApiKey(apiKey) {
+export async function testApiKey(apiKeyString) {
   try {
-    const params = new URLSearchParams({
-      part: "snippet",
-      q: "test",
-      type: "video",
-      maxResults: "1",
-      key: apiKey,
+    return await withKeyRotation(apiKeyString, async (activeKey) => {
+      const params = new URLSearchParams({
+        part: "snippet",
+        q: "test",
+        type: "video",
+        maxResults: "1",
+        key: activeKey,
+      });
+      const res = await fetch(`${BASE_URL}/search?${params}`);
+      if (!res.ok) await handleApiError(res);
+      return true;
     });
-    const res = await fetch(`${BASE_URL}/search?${params}`);
-    return res.ok;
   } catch {
     return false;
   }
