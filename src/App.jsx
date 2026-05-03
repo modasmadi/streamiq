@@ -125,6 +125,21 @@ export default function App() {
 
       <div className="main-content">
         <Topbar onSearch={handleSearch} onAISearch={handleAISearch} />
+        
+        {/* شريط الفئات للموبايل فقط */}
+        <div className="mobile-categories">
+          {CATEGORIES.map((cat) => (
+            <button
+              key={cat.id}
+              className={`m-cat ${activeCategory === cat.id ? "active" : ""}`}
+              onClick={() => selectCategory(cat.id)}
+            >
+              <span className="m-cat-icon">{cat.icon}</span>
+              {cat.label}
+            </button>
+          ))}
+        </div>
+
         <Suspense fallback={<PageLoader />}>
           {renderPage()}
         </Suspense>
